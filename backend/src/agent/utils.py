@@ -1,4 +1,7 @@
-from typing import Any, Dict, List
+import json
+import os
+import re
+from typing import Any, Dict, Iterable, List, Tuple
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage
 
 
@@ -19,21 +22,174 @@ def get_research_topic(messages: List[AnyMessage]) -> str:
     return research_topic
 
 
-def resolve_urls(urls_to_resolve: List[Any], id: int) -> Dict[str, str]:
+def require_env_var(name: str) -> str:
     """
-    Create a map of the vertex ai search urls (very long) to a short url with a unique id for each url.
-    Ensures each original URL gets a consistent shortened form while maintaining uniqueness.
-    """
-    prefix = f"https://vertexaisearch.cloud.google.com/id/"
-    urls = [site.web.uri for site in urls_to_resolve]
+    Read a required environment variable.
 
-    # Create a dictionary that maps each unique URL to its first occurrence index
-    resolved_map = {}
-    for idx, url in enumerate(urls):
+    Args:
+        name: Environment variable name.
+
+    Returns:
+        The environment variable value.
+
+    Raises:
+        ValueError: If the environment variable is missing or empty.
+    """
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        raise ValueError(f"{name} is not set")
+    return value
+
+
+def parse_json_from_text(text: str) -> Dict[str, Any]:
+    """
+    Parse a JSON object embedded in a text response.
+
+    Args:
+        text: A text response that contains a JSON object.
+
+    Returns:
+        A parsed JSON dict.
+
+    Raises:
+        ValueError: If no JSON object can be parsed from the input text.
+    """
+    if text is None:
+        raise ValueError("No text provided for JSON parsing")
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        raise ValueError("No JSON object found in text")
+
+    candidate = match.group(0)
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as e:
+        raise ValueError("Failed to parse JSON object from text") from e
+    if not isinstance(parsed, dict):
+        raise ValueError("Parsed JSON is not an object")
+    return parsed
+
+
+def resolve_urls(urls_to_resolve: Iterable[Any], id: int) -> Dict[str, str]:
+    """
+    Create a stable map of long source URLs to short placeholder URLs.
+
+    The mapping is deterministic and deduplicates by first appearance to preserve stable
+    short URL indices across runs.
+
+    Args:
+        urls_to_resolve: Iterable of URL strings or objects with a `.web.uri` attribute.
+        id: A numeric identifier used to namespace the short URLs.
+
+    Returns:
+        A dict mapping each unique original URL to a short placeholder URL.
+    """
+    prefix = "https://sources.local/id/"
+
+    urls: List[str] = []
+    for item in urls_to_resolve:
+        if isinstance(item, str):
+            urls.append(item)
+            continue
+        try:
+            urls.append(item.web.uri)
+        except AttributeError:
+            continue
+
+    # Create a dictionary that maps each unique URL to a stable index based on first appearance.
+    resolved_map: Dict[str, str] = {}
+    for url in urls:
         if url not in resolved_map:
-            resolved_map[url] = f"{prefix}{id}-{idx}"
+            resolved_map[url] = f"{prefix}{id}-{len(resolved_map)}"
 
     return resolved_map
+
+
+def tavily_results_to_research_text(
+    results: List[Dict[str, Any]],
+    id: int,
+) -> Tuple[str, List[Dict[str, str]]]:
+    """
+    Convert Tavily search results into a markdown research artifact with sources.
+
+    Args:
+        results: Tavily `results` list items containing at least `title`, `url`, and `content`.
+        id: A numeric identifier used to namespace the short URLs.
+
+    Returns:
+        A tuple of:
+        - research_text: Markdown text that embeds source links using short URLs.
+        - sources: A list of source objects with keys: `label`, `short_url`, and `value`.
+    """
+    urls = [r.get("url") for r in results if r.get("url")]
+    resolved_urls = resolve_urls(urls, id=id)
+
+    sources: List[Dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for r in results:
+        url = r.get("url")
+        title = (r.get("title") or "source").strip()
+        if not url or url not in resolved_urls:
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        sources.append(
+            {"label": title, "short_url": resolved_urls[url], "value": url}
+        )
+
+    lines: List[str] = []
+    for r in results:
+        url = r.get("url")
+        if not url or url not in resolved_urls:
+            continue
+        title = (r.get("title") or "source").strip()
+        content = (r.get("content") or "").strip()
+        if content:
+            lines.append(f"- {content} [{title}]({resolved_urls[url]})")
+        else:
+            lines.append(f"- [{title}]({resolved_urls[url]})")
+
+    return "\n".join(lines), sources
+
+
+def expand_short_urls(
+    text: str,
+    sources: List[Dict[str, str]],
+) -> Tuple[str, List[Dict[str, str]]]:
+    """
+    Expand short placeholder URLs in text to their original values.
+
+    Args:
+        text: Text containing short placeholder URLs.
+        sources: Source objects containing `short_url` and `value`.
+
+    Returns:
+        A tuple of:
+        - expanded_text: Text with short URLs replaced by full URLs.
+        - used_sources: Sources whose short URLs were present in the input text.
+    """
+    expanded_text = text
+    used_sources: List[Dict[str, str]] = []
+
+    for source in sources:
+        short_url = source.get("short_url")
+        value = source.get("value")
+        if not short_url or not value:
+            continue
+        if short_url in expanded_text:
+            expanded_text = expanded_text.replace(short_url, value)
+            used_sources.append(source)
+
+    return expanded_text, used_sources
 
 
 def insert_citation_markers(text, citations_list):
@@ -77,7 +233,7 @@ def insert_citation_markers(text, citations_list):
 
 def get_citations(response, resolved_urls_map):
     """
-    Extracts and formats citation information from a Gemini model's response.
+    Extract and format citation information from a model response.
 
     This function processes the grounding metadata provided in the response to
     construct a list of citation objects. Each citation object includes the
@@ -85,7 +241,7 @@ def get_citations(response, resolved_urls_map):
     containing formatted markdown links to the supporting web chunks.
 
     Args:
-        response: The response object from the Gemini model, expected to have
+        response: The response object from the model, expected to have
                   a structure including `candidates[0].grounding_metadata`.
                   It also relies on a `resolved_map` being available in its
                   scope to map chunk URIs to resolved URLs.

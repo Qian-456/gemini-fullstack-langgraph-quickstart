@@ -1,0 +1,7 @@
+- [x] 不再需要 `GEMINI_API_KEY` 即可启动后端
+- [x] `DASHSCOPE_API_KEY`（或等价命名）与 `TAVILY_API_KEY` 均在 `.env.example` 与 `.env` 中体现
+- [x] `docker-compose.yml` 已透传新的环境变量到后端容器
+- [x] `web_research` 使用 Tavily Search 并返回包含 Markdown 来源链接的研究文本
+- [x] `sources_gathered` 可去重且包含至少 title 与 url
+- [x] 最终答案包含来源链接，且不会引用 Vertex/Gemini grounding 结构
+- [x] 单元测试覆盖关键路径并全部通过
