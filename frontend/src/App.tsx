@@ -5,6 +5,10 @@ import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { Button } from "@/components/ui/button";
+import {
+  cloneProcessedEvents,
+  upsertProcessedEvent,
+} from "@/lib/activityTimeline";
 
 export default function App() {
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
@@ -15,6 +19,7 @@ export default function App() {
   >({});
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const hasFinalizeEventOccurredRef = useRef(false);
+  const shouldAcceptEventsRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const thread = useStream<{
     messages: Message[];
@@ -60,10 +65,10 @@ export default function App() {
         hasFinalizeEventOccurredRef.current = true;
       }
       if (processedEvent) {
-        setProcessedEventsTimeline((prevEvents) => [
-          ...prevEvents,
-          processedEvent!,
-        ]);
+        if (!shouldAcceptEventsRef.current) return;
+        setProcessedEventsTimeline((prevEvents) =>
+          upsertProcessedEvent(prevEvents, processedEvent!)
+        );
       }
     },
     onError: (error: any) => {
@@ -92,18 +97,21 @@ export default function App() {
       if (lastMessage && lastMessage.type === "ai" && lastMessage.id) {
         setHistoricalActivities((prev) => ({
           ...prev,
-          [lastMessage.id!]: [...processedEventsTimeline],
+          [lastMessage.id!]: cloneProcessedEvents(processedEventsTimeline),
         }));
       }
       hasFinalizeEventOccurredRef.current = false;
+      shouldAcceptEventsRef.current = false;
     }
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
   const handleSubmit = useCallback(
     (submittedInputValue: string, effort: string, model: string) => {
       if (!submittedInputValue.trim()) return;
+      thread.stop();
       setProcessedEventsTimeline([]);
       hasFinalizeEventOccurredRef.current = false;
+      shouldAcceptEventsRef.current = true;
 
       // convert effort to, initial_search_query_count and max_research_loops
       // low means max 1 loop and 1 query

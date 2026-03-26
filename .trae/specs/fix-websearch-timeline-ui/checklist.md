@@ -1,0 +1,6 @@
+- [x] 同一轮请求中 `Web Research` 在 timeline 里最多展示 1 条（不重复窗口）
+- [x] `Web Research` 展示数据会随最新 `web_research` 事件更新
+- [x] 连续提交问题时，上一轮延迟事件不会出现在新一轮 live timeline
+- [x] 历史消息的 timeline 为 finalize 时快照，后续不会被改写或污染
+- [x] 前端新增/更新的单测全部通过
+- [x] 未引入新的运行时环境变量需求（无需改动 `.env`/`.env.example`）
