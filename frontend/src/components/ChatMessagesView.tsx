@@ -12,6 +12,7 @@ import {
   ActivityTimeline,
   ProcessedEvent,
 } from "@/components/ActivityTimeline"; // Assuming ActivityTimeline is in the same dir or adjust path
+import { shouldShowWebSearchIndicatorAfterIndex } from "@/lib/webSearchIndicatorPlacement";
 
 // Markdown component props type from former ReportView
 type MdComponentProps = {
@@ -225,6 +226,7 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
 interface ChatMessagesViewProps {
   messages: Message[];
   isLoading: boolean;
+  webSearchIndicator: boolean;
   scrollAreaRef: React.RefObject<HTMLDivElement | null>;
   onSubmit: (inputValue: string, effort: string, model: string) => void;
   onCancel: () => void;
@@ -235,6 +237,7 @@ interface ChatMessagesViewProps {
 export function ChatMessagesView({
   messages,
   isLoading,
+  webSearchIndicator,
   scrollAreaRef,
   onSubmit,
   onCancel,
@@ -283,6 +286,18 @@ export function ChatMessagesView({
                     />
                   )}
                 </div>
+                {shouldShowWebSearchIndicatorAfterIndex({
+                  messages,
+                  index,
+                  webSearchIndicator,
+                  isLoading,
+                }) && (
+                  <div className="flex items-start gap-3">
+                    <div className="text-xs text-neutral-300 animate-pulse">
+                      正在搜索相关网页
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}

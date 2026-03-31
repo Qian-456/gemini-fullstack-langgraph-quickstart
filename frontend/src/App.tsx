@@ -9,6 +9,8 @@ import {
   cloneProcessedEvents,
   upsertProcessedEvent,
 } from "@/lib/activityTimeline";
+import { deriveUiMode, shouldShowWebSearchIndicator, UiMode } from "@/lib/uiMode";
+import { filterWebSearchToolMessages } from "@/lib/messageVisibility";
 
 export default function App() {
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
@@ -20,11 +22,13 @@ export default function App() {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const hasFinalizeEventOccurredRef = useRef(false);
   const shouldAcceptEventsRef = useRef(false);
+  const uiModeRef = useRef<UiMode>("none");
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdateEvent, setLastUpdateEvent] = useState<any>(null);
+  const [uiMode, setUiMode] = useState<UiMode>("none");
   const thread = useStream<{
     messages: Message[];
-    initial_search_query_count: number;
-    max_research_loops: number;
+    effort: string;
     reasoning_model: string;
   }>({
     apiUrl: import.meta.env.DEV
@@ -33,6 +37,7 @@ export default function App() {
     assistantId: "agent",
     messagesKey: "messages",
     onUpdateEvent: (event: any) => {
+      setLastUpdateEvent(event);
       let processedEvent: ProcessedEvent | null = null;
       if (event.generate_query) {
         processedEvent = {
@@ -105,34 +110,26 @@ export default function App() {
     }
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
+  useEffect(() => {
+    const nextMode = deriveUiMode({
+      messages: thread.messages,
+      lastEvent: lastUpdateEvent,
+    });
+    setUiMode(nextMode);
+    uiModeRef.current = nextMode;
+    shouldAcceptEventsRef.current = nextMode === "research";
+  }, [thread.messages, lastUpdateEvent]);
+
   const handleSubmit = useCallback(
     (submittedInputValue: string, effort: string, model: string) => {
       if (!submittedInputValue.trim()) return;
       thread.stop();
       setProcessedEventsTimeline([]);
       hasFinalizeEventOccurredRef.current = false;
-      shouldAcceptEventsRef.current = true;
-
-      // convert effort to, initial_search_query_count and max_research_loops
-      // low means max 1 loop and 1 query
-      // medium means max 3 loops and 3 queries
-      // high means max 10 loops and 5 queries
-      let initial_search_query_count = 0;
-      let max_research_loops = 0;
-      switch (effort) {
-        case "low":
-          initial_search_query_count = 1;
-          max_research_loops = 1;
-          break;
-        case "medium":
-          initial_search_query_count = 3;
-          max_research_loops = 3;
-          break;
-        case "high":
-          initial_search_query_count = 5;
-          max_research_loops = 10;
-          break;
-      }
+      shouldAcceptEventsRef.current = false;
+      uiModeRef.current = "none";
+      setUiMode("none");
+      setLastUpdateEvent(null);
 
       const newMessages: Message[] = [
         ...(thread.messages || []),
@@ -144,8 +141,7 @@ export default function App() {
       ];
       thread.submit({
         messages: newMessages,
-        initial_search_query_count: initial_search_query_count,
-        max_research_loops: max_research_loops,
+        effort: effort,
         reasoning_model: model,
       });
     },
@@ -157,7 +153,8 @@ export default function App() {
     window.location.reload();
   }, [thread]);
 
-  const displayMessages = thread.messages.filter((m) => {
+  const displayMessages = filterWebSearchToolMessages(
+    thread.messages.filter((m) => {
     if (m.type === "ai" && typeof m.content === "string") {
       const cleanStr = m.content.replace(/^```json\s*/, "").trim();
       if (!cleanStr.startsWith("{")) return true;
@@ -181,7 +178,8 @@ export default function App() {
       }
     }
     return true;
-  });
+    })
+  );
 
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
@@ -210,6 +208,10 @@ export default function App() {
             <ChatMessagesView
               messages={displayMessages}
               isLoading={thread.isLoading}
+              webSearchIndicator={shouldShowWebSearchIndicator({
+                mode: uiMode,
+                isLoading: thread.isLoading,
+              })}
               scrollAreaRef={scrollAreaRef}
               onSubmit={handleSubmit}
               onCancel={handleCancel}

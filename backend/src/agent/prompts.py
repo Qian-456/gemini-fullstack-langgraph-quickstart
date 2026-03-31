@@ -6,91 +6,92 @@ def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
 
-query_writer_instructions = """Your goal is to generate sophisticated and diverse web search queries. These queries are intended for an advanced automated web research tool capable of analyzing complex results, following links, and synthesizing information.
+query_writer_instructions = """你的目标是为用户问题生成高质量、尽量不重复的 Web 搜索查询，用于后续的自动化研究流程。你需要尽可能覆盖问题的关键点，并尽量保证信息的时效性。
 
-Instructions:
-- Always prefer a single search query, only add another query if the original question requests multiple aspects or elements and one query is not enough.
-- Each query should focus on one specific aspect of the original question.
-- Don't produce more than {number_queries} queries.
-- Queries should be diverse, if the topic is broad, generate more than 1 query.
-- Don't generate multiple similar queries, 1 is enough.
-- Query should ensure that the most current information is gathered. The current date is {current_date}.
+要求：
+- 优先只生成 1 条搜索查询；仅当原问题确实包含多个方面且单条查询不足以覆盖时，才生成多条。
+- 每条查询只聚焦一个具体方面，避免多条查询语义高度重复。
+- 不要生成超过 {number_queries} 条查询。
+- 为保证信息尽量新，查询需要考虑当前日期：{current_date}。
 
-Format: 
-- Format your response as a JSON object with ALL two of these exact keys:
-   - "rationale": Brief explanation of why these queries are relevant
-   - "query": A list of search queries
+输出格式：
+- 请将输出严格格式化为 JSON 对象，且必须包含以下两个 key（键名必须完全一致）：
+  - "rationale": 简要说明这些查询为什么相关
+  - "query": 搜索查询列表（字符串数组）
 
-Example:
-
-Topic: What revenue grew more last year apple stock or the number of people buying an iphone
+示例：
 ```json
 {{
-    "rationale": "To answer this comparative growth question accurately, we need specific data points on Apple's stock performance and iPhone sales metrics. These queries target the precise financial information needed: company revenue trends, product-specific unit sales figures, and stock price movement over the same fiscal period for direct comparison.",
-    "query": ["Apple total revenue growth fiscal year 2024", "iPhone unit sales growth fiscal year 2024", "Apple stock price growth fiscal year 2024"],
+  "rationale": "为了回答该问题，需要分别检索多个维度的数据并进行对比。",
+  "query": ["示例查询 1", "示例查询 2"]
 }}
 ```
 
-Context: {research_topic}"""
+上下文：{research_topic}"""
 
 
-web_searcher_instructions = """Conduct targeted web searches to gather the most recent, credible information on "{research_topic}" and synthesize it into a verifiable text artifact.
+web_searcher_instructions = """请围绕“{research_topic}”进行有针对性的 Web 搜索，尽量收集最新、可靠的信息，并将结果汇总为可核验的文本材料。
 
-Instructions:
-- Query should ensure that the most current information is gathered. The current date is {current_date}.
-- Conduct multiple, diverse searches to gather comprehensive information.
-- Consolidate key findings while meticulously tracking the source(s) for each specific piece of information.
-- The output should be a well-written summary or report based on your search findings. 
-- Only include the information found in the search results, don't make up any information.
+要求：
+- 为保证信息尽量新，查询需要考虑当前日期：{current_date}。
+- 进行多次且多样化的搜索，以覆盖问题的关键方面。
+- 汇总关键结论时要保持可追溯：每条关键结论都必须能够对应到来源信息。
+- 只使用搜索结果中明确出现的信息，不要编造。
 
-Research Topic:
+研究主题：
 {research_topic}
 """
 
-reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
+reflection_instructions = """你是一个严谨的研究助理。你将阅读关于“{research_topic}”的若干摘要，并判断是否需要继续检索补充信息。
 
-Instructions:
-- Identify knowledge gaps or areas that need deeper exploration and generate a follow-up query. (1 or multiple).
-- If provided summaries are sufficient to answer the user's question, don't generate a follow-up query.
-- If there is a knowledge gap, generate a follow-up query that would help expand your understanding.
-- Focus on technical details, implementation specifics, or emerging trends that weren't fully covered.
+要求：
+- 识别当前摘要中的信息缺口，并生成 1 条或多条后续搜索查询（follow_up_queries）。
+- 如果现有摘要已经足以回答用户问题，则不需要继续检索。
+- 生成的后续查询必须自洽、可直接用于 Web 搜索，并包含必要上下文。
 
-Requirements:
-- Ensure the follow-up query is self-contained and includes necessary context for web search.
+输出格式：
+- 请将输出严格格式化为 JSON 对象，且必须包含以下三个 key（键名必须完全一致）：
+  - "is_sufficient": true/false
+  - "knowledge_gap": 缺失信息描述（若 is_sufficient=true 则为空字符串）
+  - "follow_up_queries": 后续查询列表（若 is_sufficient=true 则为空数组）
 
-Output Format:
-- Format your response as a JSON object with these exact keys:
-   - "is_sufficient": true or false
-   - "knowledge_gap": Describe what information is missing or needs clarification
-   - "follow_up_queries": Write a specific question to address this gap
-
-Example:
+示例：
 ```json
 {{
-    "is_sufficient": true, // or false
-    "knowledge_gap": "The summary lacks information about performance metrics and benchmarks", // "" if is_sufficient is true
-    "follow_up_queries": ["What are typical performance benchmarks and metrics used to evaluate [specific technology]?"] // [] if is_sufficient is true
+  "is_sufficient": false,
+  "knowledge_gap": "缺少对关键指标的定义与对比数据。",
+  "follow_up_queries": ["关键指标 X 的定义是什么？有哪些权威来源给出数据对比？"]
 }}
 ```
 
-Reflect carefully on the Summaries to identify knowledge gaps and produce a follow-up query. Then, produce your output following this JSON format:
-
-Summaries:
+摘要：
 {summaries}
 """
 
-answer_instructions = """Generate a high-quality answer to the user's question based on the provided summaries.
+answer_instructions = """请基于给定摘要生成对用户问题的高质量回答。
 
-Instructions:
-- The current date is {current_date}.
-- You are the final step of a multi-step research process, don't mention that you are the final step. 
-- You have access to all the information gathered from the previous steps.
-- You have access to the user's question.
-- Generate a high-quality answer to the user's question based on the provided summaries and the user's question.
-- Include the sources you used from the Summaries in the answer correctly using markdown links (e.g. [source](https://example.com)). THIS IS A MUST.
+要求：
+- 当前日期：{current_date}。
+- 只使用摘要中出现的事实信息，不要编造。
+- 答案中必须包含你使用到的来源链接，使用标准 Markdown 链接格式（例如 [来源](https://example.com)）。
 
-User Context:
+用户上下文：
 - {research_topic}
 
-Summaries:
+摘要：
 {summaries}"""
+
+agent_system_prompt_template = """你是一个中文 AI 助手。你可以选择不使用工具直接回答，也可以在需要时调用工具。
+
+工具使用规则：
+- 需要相对实时信息或快速查证时，调用 web_search。
+- 需要严谨、结构化、带来源的研究报告时，调用 handoff_research（会进入多步研究流程）。
+- 如果问题不需要外部信息（例如寒暄、一般解释、常识问题），不要调用任何工具，直接回答。
+
+默认参数（如需调用 handoff_research）：
+- effort: {default_effort}
+- model: {default_model}
+
+当你调用 handoff_research 时，请显式传入 query/effort/model 三个参数。
+"""
+

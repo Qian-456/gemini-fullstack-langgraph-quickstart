@@ -1,306 +1,177 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
+from langgraph.prebuilt.tool_node import tools_condition
+from langgraph.types import Command
 
 from agent.configuration import Configuration
-from agent.prompts import (
-    answer_instructions,
-    get_current_date,
-    query_writer_instructions,
-    reflection_instructions,
+from agent.state import OverallState
+from agent.subgraph import (
+    continue_to_web_research,
+    evaluate_research,
+    finalize_answer,
+    generate_query,
+    reflection,
+    web_research,
 )
-from agent.state import (
-    OverallState,
-    QueryGenerationState,
-    ReflectionState,
-    WebSearchState,
-)
-from agent.tools_and_schemas import Reflection, SearchQueryList
-from agent.utils import (
-    expand_short_urls,
-    get_research_topic,
-    parse_json_from_text,
-    require_env_var,
-    tavily_results_to_research_text,
-)
+from agent.utils import require_env_var
+from agent.prompts import agent_system_prompt_template
 
 load_dotenv()
 
 
-# Nodes
-def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
-    """LangGraph node that generates search queries based on the User's question.
 
-    Uses Qwen (via DashScope) to create optimized search queries for web research based
-    on the User's question.
 
-    Args:
-        state: Current graph state containing the User's question
-        config: Configuration for the runnable, including LLM provider settings
 
-    Returns:
-        Dictionary with state update, including search_query key containing the generated queries
-    """
+@tool("web_search")
+def web_search_tool(query: str) -> str:
+    """使用 Web Search 获取相对实时信息。"""
+    return query
+
+
+@tool("handoff_research")
+def handoff_research_tool(
+    query: str,
+    effort: str = "medium",
+    model: str = "qwen-plus",
+) -> str:
+    """进入研究子流程，参数包含 query、effort、model。"""
+    return json.dumps({"query": query, "effort": effort, "model": model}, ensure_ascii=False)
+
+
+def _effort_to_limits(effort: str) -> tuple[int, int]:
+    effort = (effort or "medium").lower()
+    if effort == "low":
+        return 1, 1
+    if effort == "high":
+        return 5, 10
+    return 3, 3
+
+
+def agent_node(state: OverallState, config: RunnableConfig) -> dict[str, Any]:
+    """Call the tool-calling agent model and append its message to state."""
     configurable = Configuration.from_runnable_config(config)
-
-    # check for custom initial search query count
-    if state.get("initial_search_query_count") is None:
-        state["initial_search_query_count"] = configurable.number_of_initial_queries
-
     require_env_var("DASHSCOPE_API_KEY")
     from langchain_community.chat_models import ChatTongyi
 
     llm = ChatTongyi(
-        model=configurable.query_generator_model,
-        temperature=1.0,
+        model=configurable.reflection_model,
+        temperature=0.2,
         max_retries=2,
+    ).bind_tools([web_search_tool, handoff_research_tool])
+
+    default_effort = state.get("effort") or "medium"
+    default_model = state.get("reasoning_model") or configurable.reflection_model
+    system_prompt = agent_system_prompt_template.format(
+        default_effort=default_effort,
+        default_model=default_model,
     )
-    structured_llm = llm.with_structured_output(SearchQueryList)
-
-    # Format the prompt
-    current_date = get_current_date()
-    formatted_prompt = query_writer_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-        number_queries=state["initial_search_query_count"],
-    )
-    # Generate the search queries
-    try:
-        result = structured_llm.invoke(formatted_prompt)
-    except Exception:
-        result = None
-
-    if result is None:
-        raw = llm.invoke(formatted_prompt)
-        parsed = parse_json_from_text(raw.content)
-        queries = parsed.get("query", [])
-        if isinstance(queries, str):
-            queries = [queries]
-        if not isinstance(queries, list) or not queries:
-            queries = [get_research_topic(state["messages"])]
-        return {"search_query": queries[: state["initial_search_query_count"]]}
-
-    return {"search_query": result.query}
+    messages = [SystemMessage(content=system_prompt), *state["messages"]]
+    ai: AIMessage = llm.invoke(messages)
+    return {"messages": [ai]}
 
 
-def continue_to_web_research(state: QueryGenerationState):
-    """LangGraph node that sends the search queries to the web research node.
+def tools_node(state: OverallState, config: RunnableConfig):
+    """Execute tool calls from the last AI message."""
+    last = state["messages"][-1]
+    tool_calls = getattr(last, "tool_calls", []) or []
+    if not tool_calls:
+        return {"messages": []}
 
-    This is used to spawn n number of web research nodes, one for each search query.
-    """
-    return [
-        Send("web_research", {"search_query": search_query, "id": int(idx)})
-        for idx, search_query in enumerate(state["search_query"])
-    ]
+    call = tool_calls[0]
+    name = call.get("name")
+    args = call.get("args") or {}
+    tool_call_id = call.get("id") or "tool_call"
 
+    if name == "web_search":
+        require_env_var("TAVILY_API_KEY")
+        from tavily import TavilyClient
 
-def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs web research using Tavily Search.
+        query = str(args.get("query") or "")
+        client = TavilyClient(api_key=require_env_var("TAVILY_API_KEY"))
+        search = client.search(
+            query=query,
+            max_results=5,
+            search_depth="advanced",
+        )
+        results = search.get("results", [])
+        lines = []
+        for r in results:
+            url = r.get("url")
+            title = (r.get("title") or "source").strip()
+            content = (r.get("content") or "").strip()
+            if not url:
+                continue
+            if content:
+                lines.append(f"- {content} [{title}]({url})")
+            else:
+                lines.append(f"- [{title}]({url})")
+        content = "\n".join(lines) if lines else "未找到可用的搜索结果。"
+        return {"messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]}
 
-    Executes a web search via Tavily Search and converts search results into a markdown
-    artifact that includes clickable sources.
+    if name == "handoff_research":
+        query = str(args.get("query") or "")
+        effort = str(args.get("effort") or "medium")
+        model = str(args.get("model") or "qwen-plus")
+        initial_search_query_count, max_research_loops = _effort_to_limits(effort)
 
-    Args:
-        state: Current graph state containing the search query and research loop count
-        config: Configuration for the runnable, including search API settings
-
-    Returns:
-        Dictionary with state update, including sources_gathered, research_loop_count, and web_research_results
-    """
-    require_env_var("TAVILY_API_KEY")
-    from tavily import TavilyClient
-
-    client = TavilyClient(api_key=require_env_var("TAVILY_API_KEY"))
-    search = client.search(
-        query=state["search_query"],
-        max_results=5,
-        search_depth="advanced",
-    )
-    results = search.get("results", [])
-    modified_text, sources_gathered = tavily_results_to_research_text(
-        results=results,
-        id=state["id"],
-    )
-
-    return {
-        "sources_gathered": sources_gathered,
-        "search_query": [state["search_query"]],
-        "web_research_result": [modified_text],
-    }
-
-
-def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
-    """LangGraph node that identifies knowledge gaps and generates potential follow-up queries.
-
-    Analyzes the current summary to identify areas for further research and generates
-    potential follow-up queries. Uses structured output to extract
-    the follow-up query in JSON format.
-
-    Args:
-        state: Current graph state containing the running summary and research topic
-        config: Configuration for the runnable, including LLM provider settings
-
-    Returns:
-        Dictionary with state update, including search_query key containing the generated follow-up query
-    """
-    configurable = Configuration.from_runnable_config(config)
-    # Increment the research loop count and get the reasoning model
-    state["research_loop_count"] = state.get("research_loop_count", 0) + 1
-    reasoning_model = state.get("reasoning_model", configurable.reflection_model)
-
-    # Format the prompt
-    current_date = get_current_date()
-    formatted_prompt = reflection_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-        summaries="\n\n---\n\n".join(state["web_research_result"]),
-    )
-    require_env_var("DASHSCOPE_API_KEY")
-    from langchain_community.chat_models import ChatTongyi
-
-    llm = ChatTongyi(
-        model=reasoning_model,
-        temperature=1.0,
-        max_retries=2,
-    )
-    structured_llm = llm.with_structured_output(Reflection)
-    try:
-        result = structured_llm.invoke(formatted_prompt)
-    except Exception:
-        result = None
-
-    if result is None:
-        raw = llm.invoke(formatted_prompt)
-        parsed = parse_json_from_text(raw.content)
-        is_sufficient = bool(parsed.get("is_sufficient", False))
-        knowledge_gap = str(parsed.get("knowledge_gap", ""))
-        follow_up_queries = parsed.get("follow_up_queries", [])
-        if isinstance(follow_up_queries, str):
-            follow_up_queries = [follow_up_queries]
-        if not isinstance(follow_up_queries, list):
-            follow_up_queries = []
-        return {
-            "is_sufficient": is_sufficient,
-            "knowledge_gap": knowledge_gap if not is_sufficient else "",
-            "follow_up_queries": follow_up_queries if not is_sufficient else [],
-            "research_loop_count": state["research_loop_count"],
-            "number_of_ran_queries": len(state["search_query"]),
+        update: dict[str, Any] = {
+            "messages": [ToolMessage(content="进入研究流程。", tool_call_id=tool_call_id)],
+            "initial_search_query_count": initial_search_query_count,
+            "max_research_loops": max_research_loops,
+            "reasoning_model": model,
+            "research_loop_count": 0,
+            "search_query": [],
+            "web_research_result": [],
+            "sources_gathered": [],
         }
+        if query:
+            update["search_query"] = []
+        return Command(goto="generate_query", update=update)
 
     return {
-        "is_sufficient": result.is_sufficient,
-        "knowledge_gap": result.knowledge_gap,
-        "follow_up_queries": result.follow_up_queries,
-        "research_loop_count": state["research_loop_count"],
-        "number_of_ran_queries": len(state["search_query"]),
-    }
-
-
-def evaluate_research(
-    state: ReflectionState,
-    config: RunnableConfig,
-) -> OverallState:
-    """LangGraph routing function that determines the next step in the research flow.
-
-    Controls the research loop by deciding whether to continue gathering information
-    or to finalize the summary based on the configured maximum number of research loops.
-
-    Args:
-        state: Current graph state containing the research loop count
-        config: Configuration for the runnable, including max_research_loops setting
-
-    Returns:
-        String literal indicating the next node to visit ("web_research" or "finalize_summary")
-    """
-    configurable = Configuration.from_runnable_config(config)
-    max_research_loops = (
-        state.get("max_research_loops")
-        if state.get("max_research_loops") is not None
-        else configurable.max_research_loops
-    )
-    if state["is_sufficient"] or state["research_loop_count"] >= max_research_loops:
-        return "finalize_answer"
-    else:
-        return [
-            Send(
-                "web_research",
-                {
-                    "search_query": follow_up_query,
-                    "id": state["number_of_ran_queries"] + int(idx),
-                },
+        "messages": [
+            ToolMessage(
+                content=f"不支持的工具：{name}",
+                tool_call_id=tool_call_id,
+                status="error",
             )
-            for idx, follow_up_query in enumerate(state["follow_up_queries"])
         ]
-
-
-def finalize_answer(state: OverallState, config: RunnableConfig):
-    """LangGraph node that finalizes the research summary.
-
-    Prepares the final output by deduplicating and formatting sources, then
-    combining them with the running summary to create a well-structured
-    research report with proper citations.
-
-    Args:
-        state: Current graph state containing the running summary and sources gathered
-
-    Returns:
-        Dictionary with state update, including running_summary key containing the formatted final summary with sources
-    """
-    configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.answer_model
-
-    # Format the prompt
-    current_date = get_current_date()
-    formatted_prompt = answer_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-        summaries="\n---\n\n".join(state["web_research_result"]),
-    )
-
-    require_env_var("DASHSCOPE_API_KEY")
-    from langchain_community.chat_models import ChatTongyi
-
-    llm = ChatTongyi(
-        model=reasoning_model,
-        temperature=0,
-        max_retries=2,
-    )
-    result = llm.invoke(formatted_prompt)
-    expanded_text, used_sources = expand_short_urls(
-        result.content, state["sources_gathered"]
-    )
-
-    return {
-        "messages": [AIMessage(content=expanded_text)],
-        "sources_gathered": used_sources,
     }
 
 
-# Create our Agent Graph
 builder = StateGraph(OverallState, config_schema=Configuration)
 
-# Define the nodes we will cycle between
+builder.add_node("agent", agent_node)
+builder.add_node("tools", tools_node)
+
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
 
-# Set the entrypoint as `generate_query`
-# This means that this node is the first one called
-builder.add_edge(START, "generate_query")
-# Add conditional edge to continue with search queries in a parallel branch
+builder.add_edge(START, "agent")
+builder.add_conditional_edges(
+    "agent",
+    tools_condition,
+    {"tools": "tools", "__end__": END},
+)
+builder.add_edge("tools", "agent")
+
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research"]
 )
-# Reflect on the web research
 builder.add_edge("web_research", "reflection")
-# Evaluate the research
 builder.add_conditional_edges(
     "reflection", evaluate_research, ["web_research", "finalize_answer"]
 )
-# Finalize the answer
 builder.add_edge("finalize_answer", END)
 
-graph = builder.compile(name="pro-search-agent")
+graph = builder.compile(name="agent-main-graph")

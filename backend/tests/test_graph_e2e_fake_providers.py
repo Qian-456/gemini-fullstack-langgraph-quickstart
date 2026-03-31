@@ -1,9 +1,8 @@
 import sys
 import types
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.graph import graph
 from agent.tools_and_schemas import Reflection, SearchQueryList
 
 
@@ -55,8 +54,34 @@ def test_graph_invoke_e2e_with_fake_providers(monkeypatch):
             self.temperature = temperature
             self.max_retries = max_retries
 
+        def bind_tools(self, tools):
+            self._tools = tools
+            return self
+
         def invoke(self, prompt: str):
-            if "Format your response as a JSON object" in prompt:
+            if isinstance(prompt, list):
+                last_tool = next(
+                    (m for m in reversed(prompt) if isinstance(m, ToolMessage)), None
+                )
+                if last_tool is not None:
+                    return AIMessage(
+                        content="这是最终回答（含来源）：https://a",
+                    )
+                last_human = next(
+                    (m for m in reversed(prompt) if isinstance(m, HumanMessage)), None
+                )
+                query = last_human.content if last_human else "test question"
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "handoff_research",
+                            "args": {"query": query, "effort": "low", "model": "qwen-plus"},
+                            "id": "c_research",
+                        }
+                    ],
+                )
+            if self.temperature != 0:
                 return types.SimpleNamespace(
                     content='{"rationale":"r","query":["q1"]}'
                 )
@@ -71,6 +96,8 @@ def test_graph_invoke_e2e_with_fake_providers(monkeypatch):
     lc_mod.chat_models = chat_models_mod
     sys.modules["langchain_community"] = lc_mod
     sys.modules["langchain_community.chat_models"] = chat_models_mod
+
+    from agent.graph import graph
 
     result = graph.invoke(
         {

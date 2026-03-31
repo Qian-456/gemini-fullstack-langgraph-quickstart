@@ -1,124 +1,196 @@
-# Qwen Fullstack LangGraph Quickstart
+# Gemini Fullstack LangGraph Quickstart（二开）
 
-This project demonstrates a fullstack application using a React frontend and a LangGraph-powered backend agent. The agent performs research on a user's query by dynamically generating search terms, querying the web using Tavily Search, reflecting on results to identify knowledge gaps, and iteratively refining its search until it can provide a well-supported answer with citations. This application serves as an example of building research-augmented conversational AI using LangGraph and Tongyi Qwen models.
+这是一个基于 Gemini Fullstack LangGraph Quickstart 的二次开发项目：前端使用 React（Vite），后端使用 LangGraph + FastAPI，实现了一个可正常对话的智能体，并支持 WebSearch；当用户需要更深入的答案时，可以走 Research 流程对特定话题进行更深度的检索与归纳。
 
-<img src="./app.png" title="Qwen Fullstack LangGraph" alt="Qwen Fullstack LangGraph" width="90%">
+目前暂不支持流式回复（Streaming）。
 
-## Features
+<img src="./app.png" title="Fullstack LangGraph" alt="Fullstack LangGraph" width="90%">
 
-- 💬 Fullstack application with a React frontend and LangGraph backend.
-- 🧠 Powered by a LangGraph agent for advanced research and conversational AI.
-- 🔍 Dynamic search query generation using Tongyi Qwen models.
-- 🌐 Integrated web research via Tavily Search.
-- 🤔 Reflective reasoning to identify knowledge gaps and refine searches.
-- 📄 Generates answers with citations from gathered sources.
-- 🔄 Hot-reloading for both frontend and backend during development.
+## 你将获得什么
 
-## Project Structure
+- 一个可用的聊天 UI（当前为非流式输出）。
+- 一个“普通对话 + 可选深度研究”的 LangGraph 智能体：
+  - 普通对话：直接回答并保持上下文。
+  - WebSearch：需要联网时调用搜索工具补充信息。
+  - Research：对话题进行更深入的多轮检索与归纳（按配置限制轮数）。
+- 前后端本地开发热更新。
+- 生产化部署示例（Docker Compose + Redis + Postgres）。
 
-The project is divided into two main directories:
+## 项目结构
 
--   `frontend/`: Contains the React application built with Vite.
--   `backend/`: Contains the LangGraph/FastAPI application, including the research agent logic.
+- `frontend/`: React + Vite 前端
+- `backend/`: LangGraph + FastAPI 后端（graph、tools、prompts、config）
 
-## Getting Started: Development and Local Testing
+## 本地开发快速开始
 
-Follow these steps to get the application running locally for development and testing.
+### 1) 前置条件
 
-**1. Prerequisites:**
+- Node.js 18+ 与 npm（或 pnpm/yarn）
+- Python 3.11+
+- API keys（用于联网搜索 / LLM 调用，具体以 `backend/.env.example` 为准）：
+  - `DASHSCOPE_API_KEY`（Tongyi Qwen via DashScope）
+  - `TAVILY_API_KEY`（Tavily web search）
 
--   Node.js and npm (or yarn/pnpm)
--   Python 3.11+
--   **`DASHSCOPE_API_KEY`**: The backend agent requires a DashScope API key (Tongyi Qwen).
--   **`TAVILY_API_KEY`**: The backend agent requires a Tavily API key for web search.
-    1.  Navigate to the `backend/` directory.
-    2.  Create a file named `.env` by copying the `backend/.env.example` file.
-    3.  Open the `.env` file and add your API keys:
-        - `DASHSCOPE_API_KEY="YOUR_ACTUAL_API_KEY"`
-        - `TAVILY_API_KEY="YOUR_ACTUAL_API_KEY"`
+可选：
+- `make`（方便启动）。Windows 上更常见的方式是分别开两个终端运行前后端。
 
-**2. Install Dependencies:**
+### 2) 配置环境变量
 
-**Backend:**
+复制示例 env 文件并填写你的 keys：
 
-```bash
+```powershell
 cd backend
-pip install .
+copy .env.example .env
 ```
 
-**Frontend:**
+编辑 `backend/.env`：
+
+```bash
+DASHSCOPE_API_KEY="YOUR_ACTUAL_API_KEY"
+TAVILY_API_KEY="YOUR_ACTUAL_API_KEY"
+```
+
+### 3) 安装依赖
+
+后端：
+
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\pip install -e .
+```
+
+前端：
 
 ```bash
 cd frontend
 npm install
 ```
 
-**3. Run Development Servers:**
+### 4) 启动开发服务
 
-**Backend & Frontend:**
+推荐（尤其 Windows）：分别使用两个终端运行。
+
+终端 A（后端）：
+
+```powershell
+cd backend
+.venv\Scripts\langgraph dev
+```
+
+终端 B（前端）：
+
+```bash
+cd frontend
+npm run dev
+```
+
+打开：
+
+- 前端：`http://localhost:5173/app`
+- 后端 API：`http://127.0.0.1:2024`
+
+如果你本机可用 `make`，也可以一键启动：
 
 ```bash
 make dev
 ```
-This will run the backend and frontend development servers.    Open your browser and navigate to the frontend development server URL (e.g., `http://localhost:5173/app`).
 
-_Alternatively, you can run the backend and frontend development servers separately. For the backend, open a terminal in the `backend/` directory and run `langgraph dev`. The backend API will be available at `http://127.0.0.1:2024`. It will also open a browser window to the LangGraph UI. For the frontend, open a terminal in the `frontend/` directory and run `npm run dev`. The frontend will be available at `http://localhost:5173`._
+## 配置说明
 
-## How the Backend Agent Works (High-Level)
+- 前端通过 `frontend/src/App.tsx` 里的 `apiUrl` 连接后端。
+  - 开发环境默认：`http://localhost:2024`
+  - Docker Compose 默认：`http://localhost:8123`
+- 后端从 `backend/.env`（通过 `python-dotenv` 加载）或系统环境变量读取配置。
 
-The core of the backend is a LangGraph agent defined in `backend/src/agent/graph.py`. It follows these steps:
+## Agent 工作方式
+
+LangGraph 主图定义在 `backend/src/agent/graph.py`：
 
 <img src="./agent.png" title="Agent Flow" alt="Agent Flow" width="50%">
 
-1.  **Generate Initial Queries:** Based on your input, it generates a set of initial search queries using a Qwen model.
-2.  **Web Research:** For each query, it uses Tavily Search to find relevant web pages and produces a research artifact with source links.
-3.  **Reflection & Knowledge Gap Analysis:** The agent analyzes the search results to determine if the information is sufficient or if there are knowledge gaps. It uses a Qwen model for this reflection process.
-4.  **Iterative Refinement:** If gaps are found or the information is insufficient, it generates follow-up queries and repeats the web research and reflection steps (up to a configured maximum number of loops).
-5.  **Finalize Answer:** Once the research is deemed sufficient, the agent synthesizes the gathered information into a coherent answer, including citations from the web sources, using a Qwen model.
+高层流程（按需触发）：
 
-## CLI Example
+1. 普通对话：直接生成回答。
+2. 需要联网信息时：触发 WebSearch 获取来源。
+3. 用户需要更深度时：进入 Research 流程，对话题进行多轮检索与归纳（有最大轮数限制）。
 
-For quick one-off questions you can execute the agent from the command line. The
-script `backend/examples/cli_research.py` runs the LangGraph agent and prints the
-final answer:
+## CLI 示例
+
+不启动前端，直接命令行执行后端智能体：
 
 ```bash
 cd backend
-python examples/cli_research.py "What are the latest trends in renewable energy?"
+.venv\Scripts\python examples/cli_research.py "What are the latest trends in renewable energy?"
 ```
 
+## 测试
 
-## Deployment
+后端：
 
-In production, the backend server serves the optimized static frontend build. LangGraph requires a Redis instance and a Postgres database. Redis is used as a pub-sub broker to enable streaming real time output from background runs. Postgres is used to store assistants, threads, runs, persist thread state and long term memory, and to manage the state of the background task queue with 'exactly once' semantics. For more details on how to deploy the backend server, take a look at the [LangGraph Documentation](https://langchain-ai.github.io/langgraph/concepts/deployment_options/). Below is an example of how to build a Docker image that includes the optimized frontend build and the backend server and run it via `docker-compose`.
+```powershell
+cd backend
+.venv\Scripts\pip install pytest
+.venv\Scripts\pytest -q
+```
 
-_Note: For the docker-compose.yml example you need a LangSmith API key, you can get one from [LangSmith](https://smith.langchain.com/settings)._
+前端：
 
-_Note: If you are not running the docker-compose.yml example or exposing the backend server to the public internet, you should update the `apiUrl` in the `frontend/src/App.tsx` file to your host. Currently the `apiUrl` is set to `http://localhost:8123` for docker-compose or `http://localhost:2024` for development._
+```bash
+cd frontend
+npm test
+```
 
-**1. Build the Docker Image:**
+## 部署（Docker Compose）
 
-   Run the following command from the **project root directory**:
-   ```bash
-   docker build -t qwen-fullstack-langgraph -f Dockerfile .
-   ```
-**2. Run the Production Server:**
+生产环境中，后端会服务化地提供优化后的前端静态资源。LangGraph 部署需要：
 
-   ```bash
-   DASHSCOPE_API_KEY=<your_dashscope_api_key> TAVILY_API_KEY=<your_tavily_api_key> LANGSMITH_API_KEY=<your_langsmith_api_key> docker-compose up
-   ```
+- Redis（用于后台任务的输出推送）
+- Postgres（用于 assistants/threads/runs、线程状态与长期记忆、后台队列状态）
 
-Open your browser and navigate to `http://localhost:8123/app/` to see the application. The API will be available at `http://localhost:8123`.
+从项目根目录构建镜像：
 
-## Technologies Used
+```bash
+docker build -t qwen-fullstack-langgraph -f Dockerfile .
+```
 
-- [React](https://reactjs.org/) (with [Vite](https://vitejs.dev/)) - For the frontend user interface.
-- [Tailwind CSS](https://tailwindcss.com/) - For styling.
-- [Shadcn UI](https://ui.shadcn.com/) - For components.
-- [LangGraph](https://github.com/langchain-ai/langgraph) - For building the backend research agent.
-- Tongyi Qwen (via DashScope) - LLM for query generation, reflection, and answer synthesis.
-- [Tavily](https://tavily.com/) - Web search for research augmentation.
+启动：
+
+```bash
+DASHSCOPE_API_KEY=<your_dashscope_api_key> \
+TAVILY_API_KEY=<your_tavily_api_key> \
+LANGSMITH_API_KEY=<your_langsmith_api_key> \
+docker-compose up
+```
+
+PowerShell：
+
+```powershell
+$env:DASHSCOPE_API_KEY="<your_dashscope_api_key>"
+$env:TAVILY_API_KEY="<your_tavily_api_key>"
+$env:LANGSMITH_API_KEY="<your_langsmith_api_key>"
+docker-compose up
+```
+
+打开：
+
+- App：`http://localhost:8123/app/`
+- API：`http://localhost:8123`
+
+备注：
+
+- Docker Compose 示例需要 `LANGSMITH_API_KEY`。
+- 如果你将后端暴露到公网，请更新 `frontend/src/App.tsx` 的 `apiUrl` 指向你的实际域名/地址。
+
+## 技术栈
+
+- React + Vite
+- Tailwind CSS + shadcn/ui
+- LangGraph + FastAPI
+- Tongyi Qwen（DashScope）
+- Tavily Search
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details. 
+Apache License 2.0，详见 [LICENSE](LICENSE)。
