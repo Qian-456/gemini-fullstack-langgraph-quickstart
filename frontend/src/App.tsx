@@ -157,6 +157,32 @@ export default function App() {
     window.location.reload();
   }, [thread]);
 
+  const displayMessages = thread.messages.filter((m) => {
+    if (m.type === "ai" && typeof m.content === "string") {
+      const cleanStr = m.content.replace(/^```json\s*/, "").trim();
+      if (!cleanStr.startsWith("{")) return true;
+
+      try {
+        const parsed = JSON.parse(cleanStr);
+        if (
+          parsed.rationale !== undefined ||
+          parsed.query !== undefined ||
+          parsed.is_sufficient !== undefined
+        ) {
+          return false;
+        }
+      } catch (e) {
+        if (/^\{\s*"(rationale|query|is_sufficient)/.test(cleanStr)) {
+          return false;
+        }
+        if (cleanStr.length < 20 && /^\{\s*"?[a-z_]*"?\s*:?/.test(cleanStr)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  });
+
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       <main className="h-full w-full max-w-4xl mx-auto">
@@ -182,7 +208,7 @@ export default function App() {
             </div>
           ) : (
             <ChatMessagesView
-              messages={thread.messages}
+              messages={displayMessages}
               isLoading={thread.isLoading}
               scrollAreaRef={scrollAreaRef}
               onSubmit={handleSubmit}
